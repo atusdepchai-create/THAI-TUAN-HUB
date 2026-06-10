@@ -1,0 +1,481 @@
+-- THAI TU HUB - Fluent UI (ESP phát hiện role sớm qua leaderstats + vũ khí)
+-- Tất cả chức năng trong 1 tab: ESP, Aimbot Shift Lock, Grab Gun
+
+local Fluent = loadstring(game:HttpGet("https://github.com/dawid-scripts/Fluent/releases/latest/download/main.lua"))()
+local SaveManager = loadstring(game:HttpGet("https://raw.githubusercontent.com/dawid-scripts/Fluent/master/Addons/SaveManager.lua"))()
+local InterfaceManager = loadstring(game:HttpGet("https://raw.githubusercontent.com/dawid-scripts/Fluent/master/Addons/InterfaceManager.lua"))()
+
+-- ========== TẠO CỬA SỔ ==========
+local Window = Fluent:CreateWindow({
+    Title = "THAI TU HUB",
+    SubTitle = "ONE TOP | MM2 HACK",
+    TabWidth = 160,
+    Size = UDim2.fromOffset(580, 460),
+    Acrylic = true,
+    Theme = "Dark",
+    MinimizeKey = Enum.KeyCode.LeftControl
+})
+
+-- ========== CHỈ 1 TAB DUY NHẤT ==========
+local MainTab = Window:AddTab({ Title = "THAI TU HUB", Icon = "👑" })
+
+-- ========== BIẾN TOÀN CỤC ==========
+local Players = game:GetService("Players")
+local LocalPlayer = Players.LocalPlayer
+local RunService = game:GetService("RunService")
+local UserInputService = game:GetService("UserInputService")
+local Workspace = game:GetService("Workspace")
+local Camera = workspace.CurrentCamera
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
+
+local espEnabled = false
+local aimbotEnabled = false
+local espHighlights = {}
+local gunHighlights = {}
+local aimbotConn = nil
+local aimCircle = nil
+
+-- Lưu role của từng người chơi (cập nhật liên tục)
+local playerRoleCache = {}
+
+-- ========== HÀM XÁC ĐỊNH ROLE SIÊU NHANH ==========
+-- Ưu tiên: leaderstats (có role ngay đầu trận) > vũ khí đang cầm > backpack
+local function getPlayerRoleFast(plr)
+    if plr == LocalPlayer then return "Local" end
+    
+    -- CÁCH 1: KIỂM TRA LEADERSTATS (Role có sẵn ngay khi vào trận)
+    local ls = plr:FindFirstChild("leaderstats")
+    if ls then
+        local rs = ls:FindFirstChild("Role")
+        if rs then
+            local val = tostring(rs.Value)
+            if val:find("Murderer") or val:find("Murder") then
+                return "Murderer"
+            elseif val:find("Sheriff") then
+                return "Sheriff"
+            end
+        end
+    end
+    
+    -- CÁCH 2: KIỂM TRA VŨ KHÍ TRÊN CHARACTER (đang cầm trên tay)
+    if plr.Character then
+        local char = plr.Character
+        -- Kiểm tra tool đang cầm (CurrentTool)
+        local hum = char:FindFirstChild("Humanoid")
+        if hum then
+            local tool = hum:FindFirstChild("CurrentTool")
+            if tool then
+                if tool.Name:lower():find("knife") or tool.Name == "Knife" then
+                    return "Murderer"
+                elseif tool.Name:lower():find("gun") or tool.Name == "Gun" then
+                    return "Sheriff"
+                end
+            end
+        end
+        -- Kiểm tra tất cả tool trong character
+        for _, child in pairs(char:GetChildren()) do
+            if child:IsA("Tool") then
+                if child.Name:lower():find("knife") or child.Name == "Knife" then
+                    return "Murderer"
+                elseif child.Name:lower():find("gun") or child.Name == "Gun" then
+                    return "Sheriff"
+                end
+            end
+        end
+    end
+    
+    -- CÁCH 3: KIỂM TRA BACKPACK (túi đồ)
+    if plr.Backpack then
+        for _, tool in pairs(plr.Backpack:GetChildren()) do
+            if tool:IsA("Tool") then
+                if tool.Name:lower():find("knife") or tool.Name == "Knife" then
+                    return "Murderer"
+                elseif tool.Name:lower():find("gun") or tool.Name == "Gun" then
+                    return "Sheriff"
+                end
+            end
+        end
+    end
+    
+    return "Innocent"
+end
+
+-- Cập nhật role cache cho tất cả người chơi
+local function updateAllRoles()
+    for _, plr in pairs(Players:GetPlayers()) do
+        if plr ~= LocalPlayer then
+            local newRole = getPlayerRoleFast(plr)
+            if playerRoleCache[plr.Name] ~= newRole then
+                playerRoleCache[plr.Name] = newRole
+                -- Nếu ESP đang bật, cập nhật màu ngay
+                if espEnabled and espHighlights[plr] then
+                    local hl = espHighlights[plr]
+                    if hl and hl.Parent then
+                        if newRole == "Murderer" then
+                            hl.FillColor = Color3.fromRGB(255, 0, 0)
+                        elseif newRole == "Sheriff" then
+                            hl.FillColor = Color3.fromRGB(0, 100, 255)
+                        else
+                            hl.FillColor = Color3.fromRGB(120, 120, 120)
+                        end
+                    end
+                end
+            end
+        end
+    end
+end
+
+-- Bắt role từ RemoteEvent (MM2 thường gửi role qua remote khi bắt đầu trận)
+local function setupRemoteListener()
+    for _, remote in pairs(ReplicatedStorage:GetDescendants()) do
+        if remote:IsA("RemoteEvent") and (remote.Name:lower():find("start") or remote.Name:lower():find("role") or remote.Name:lower():find("game")) then
+            remote.OnClientEvent:Connect(function(data)
+                if type(data) == "table" then
+                    if data.Murderer and type(data.Murderer) == "Instance" then
+                        playerRoleCache[data.Murderer.Name] = "Murderer"
+                        if espEnabled and espHighlights[Players:FindFirstChild(data.Murderer.Name)] then
+                            local hl = espHighlights[Players:FindFirstChild(data.Murderer.Name)]
+                            if hl then hl.FillColor = Color3.fromRGB(255, 0, 0) end
+                        end
+                    end
+                    if data.Sheriff and type(data.Sheriff) == "Instance" then
+                        playerRoleCache[data.Sheriff.Name] = "Sheriff"
+                        if espEnabled and espHighlights[Players:FindFirstChild(data.Sheriff.Name)] then
+                            local hl = espHighlights[Players:FindFirstChild(data.Sheriff.Name)]
+                            if hl then hl.FillColor = Color3.fromRGB(0, 100, 255) end
+                        end
+                    end
+                    if data.murderer then
+                        local name = type(data.murderer) == "Instance" and data.murderer.Name or tostring(data.murderer)
+                        playerRoleCache[name] = "Murderer"
+                    end
+                    if data.sheriff then
+                        local name = type(data.sheriff) == "Instance" and data.sheriff.Name or tostring(data.sheriff)
+                        playerRoleCache[name] = "Sheriff"
+                    end
+                end
+            end)
+        end
+    end
+end
+
+-- Khởi tạo remote listener
+coroutine.wrap(setupRemoteListener)()
+
+-- Phát hiện round mới (reset cache khi vào trận mới)
+local currentRoundId = 0
+local function checkNewRound()
+    local anyWeapon = false
+    for _, plr in pairs(Players:GetPlayers()) do
+        if plr ~= LocalPlayer then
+            if plr.Character then
+                if plr.Character:FindFirstChild("Knife") or plr.Character:FindFirstChild("Gun") then
+                    anyWeapon = true
+                    break
+                end
+            end
+            if plr.Backpack and plr.Backpack:FindFirstChild("Gun") then
+                anyWeapon = true
+                break
+            end
+        end
+    end
+    if not anyWeapon and next(playerRoleCache) ~= nil then
+        -- Round mới, xóa cache cũ
+        playerRoleCache = {}
+        return true
+    end
+    return false
+end
+
+-- ========== ESP ==========
+local function refreshESP()
+    for _, hl in pairs(espHighlights) do pcall(function() hl:Destroy() end) end
+    espHighlights = {}
+    for _, hl in pairs(gunHighlights) do pcall(function() hl:Destroy() end) end
+    gunHighlights = {}
+    
+    if not espEnabled then return end
+    
+    -- ESP cho người chơi
+    for _, plr in pairs(Players:GetPlayers()) do
+        if plr ~= LocalPlayer and plr.Character then
+            local hl = Instance.new("Highlight")
+            hl.Adornee = plr.Character
+            hl.Parent = plr.Character
+            hl.FillTransparency = 0.4
+            hl.OutlineColor = Color3.fromRGB(255, 255, 255)
+            
+            local role = playerRoleCache[plr.Name] or getPlayerRoleFast(plr)
+            if role == "Murderer" then
+                hl.FillColor = Color3.fromRGB(255, 0, 0)
+            elseif role == "Sheriff" then
+                hl.FillColor = Color3.fromRGB(0, 100, 255)
+            else
+                hl.FillColor = Color3.fromRGB(120, 120, 120)
+            end
+            espHighlights[plr] = hl
+        end
+    end
+    
+    -- ESP cho súng rớt (màu vàng)
+    for _, item in pairs(Workspace:GetDescendants()) do
+        if item:IsA("Tool") and item.Name == "Gun" and item:FindFirstChild("Handle") then
+            local parent = item.Parent
+            if not parent:IsA("Model") or not parent:FindFirstChild("Humanoid") then
+                local hl = Instance.new("Highlight")
+                hl.Adornee = item
+                hl.Parent = item
+                hl.FillColor = Color3.fromRGB(255, 200, 0)
+                hl.FillTransparency = 0.3
+                hl.OutlineColor = Color3.fromRGB(255, 255, 255)
+                table.insert(gunHighlights, hl)
+            end
+        end
+    end
+end
+
+local function updateESPColors()
+    for plr, hl in pairs(espHighlights) do
+        if hl and hl.Parent then
+            local role = playerRoleCache[plr.Name] or getPlayerRoleFast(plr)
+            if role == "Murderer" then
+                hl.FillColor = Color3.fromRGB(255, 0, 0)
+            elseif role == "Sheriff" then
+                hl.FillColor = Color3.fromRGB(0, 100, 255)
+            else
+                hl.FillColor = Color3.fromRGB(120, 120, 120)
+            end
+        end
+    end
+end
+
+-- Vòng lặp cập nhật role và ESP (chạy liên tục)
+local function startESPLoop()
+    coroutine.wrap(function()
+        while espEnabled do
+            if checkNewRound() then
+                refreshESP()
+            else
+                updateAllRoles()  -- Cập nhật role từ leaderstats và vũ khí
+                updateESPColors()
+            end
+            task.wait(0.2)  -- Cập nhật nhanh để bắt kịp role
+        end
+    end)()
+end
+
+-- ========== AIMBOT ==========
+local function createAimCircle()
+    if aimCircle then aimCircle:Destroy() end
+    local circle = Instance.new("Frame")
+    circle.Size = UDim2.new(0, 110, 0, 110)
+    circle.Position = UDim2.new(0.5, -55, 0.5, -55)
+    circle.BackgroundTransparency = 1
+    circle.BorderSizePixel = 4
+    circle.BorderColor3 = Color3.fromRGB(255, 0, 0)
+    circle.Visible = false
+    circle.Parent = game:GetService("CoreGui")
+    local circCorner = Instance.new("UICorner")
+    circCorner.CornerRadius = UDim.new(1, 0)
+    circCorner.Parent = circle
+    return circle
+end
+
+local function startAimbot()
+    if aimbotConn then aimbotConn:Disconnect() end
+    aimbotConn = RunService.RenderStepped:Connect(function()
+        if not aimbotEnabled then
+            if aimCircle then aimCircle.Visible = false end
+            return
+        end
+        if UserInputService.MouseBehavior == Enum.MouseBehavior.LockCenter then
+            if not aimCircle then aimCircle = createAimCircle() end
+            aimCircle.Visible = true
+            local target = nil
+            local center = Vector2.new(Camera.ViewportSize.X / 2, Camera.ViewportSize.Y / 2)
+            local bestDist = 450
+            for _, plr in pairs(Players:GetPlayers()) do
+                if plr ~= LocalPlayer and plr.Character then
+                    local role = playerRoleCache[plr.Name] or getPlayerRoleFast(plr)
+                    if role == "Murderer" then
+                        local hrp = plr.Character:FindFirstChild("HumanoidRootPart")
+                        if hrp then
+                            local pos, onScreen = Camera:WorldToScreenPoint(hrp.Position)
+                            if onScreen then
+                                local d = (Vector2.new(pos.X, pos.Y) - center).Magnitude
+                                if d < bestDist then
+                                    bestDist = d
+                                    target = hrp
+                                end
+                            end
+                        end
+                    end
+                end
+            end
+            if target then
+                Camera.CFrame = CFrame.new(Camera.CFrame.Position, target.Position)
+            end
+        else
+            if aimCircle then aimCircle.Visible = false end
+        end
+    end)
+end
+
+-- ========== GRAB GUN ==========
+local function grabGun()
+    if not LocalPlayer.Character then
+        Fluent:Notify({Title = "Lỗi", Content = "Không tìm thấy nhân vật!", Duration = 2})
+        return
+    end
+    local hrp = LocalPlayer.Character:FindFirstChild("HumanoidRootPart")
+    if not hrp then return end
+    local closestGun, minDist = nil, math.huge
+    local charPos = hrp.Position
+    for _, item in pairs(Workspace:GetDescendants()) do
+        if item:IsA("Tool") and item.Name == "Gun" and item:FindFirstChild("Handle") then
+            local parent = item.Parent
+            if not parent:IsA("Model") or not parent:FindFirstChild("Humanoid") then
+                local d = (item.Handle.Position - charPos).Magnitude
+                if d < minDist then
+                    minDist = d
+                    closestGun = item
+                end
+            end
+        end
+    end
+    if closestGun then
+        hrp.CFrame = CFrame.new(closestGun.Handle.Position + Vector3.new(0, 2, 0))
+        task.wait(0.15)
+        local prompt = closestGun:FindFirstChild("ProximityPrompt")
+        if prompt then
+            prompt:InputHoldBegin()
+            task.wait(0.1)
+            prompt:InputHoldEnd()
+        end
+        Fluent:Notify({Title = "Thành công", Content = "Đã nhặt được súng!", Duration = 2})
+    else
+        Fluent:Notify({Title = "Lỗi", Content = "Không tìm thấy súng trên sàn!", Duration = 2})
+    end
+end
+
+-- ========== TẠO MENU TRONG 1 TAB ==========
+MainTab:AddParagraph({
+    Title = "THAI TU HUB - ONE TOP",
+    Content = "by THAI TU | Murder Mystery 2 Hack"
+})
+
+MainTab:AddParagraph({
+    Title = "MÀU SẮC ESP",
+    Content = "🔴 Murderer | 🔵 Sheriff | ⚪ Innocent | 🟡 Súng rớt"
+})
+
+-- ESP Toggle
+local EspToggle = MainTab:AddToggle("EspToggle", {
+    Title = "ESP",
+    Description = "Bật/tắt ESP (phát hiện role qua leaderstats + vũ khí ngay đầu trận)",
+    Default = false
+})
+EspToggle:OnChanged(function()
+    espEnabled = EspToggle.Value
+    if espEnabled then
+        updateAllRoles()
+        refreshESP()
+        startESPLoop()
+        for _, plr in pairs(Players:GetPlayers()) do
+            if plr ~= LocalPlayer then
+                plr.CharacterAdded:Connect(function() 
+                    task.wait(0.3)
+                    if espEnabled then refreshESP() end
+                end)
+            end
+        end
+        Players.PlayerAdded:Connect(function(plr)
+            if espEnabled then
+                plr.CharacterAdded:Connect(function() 
+                    task.wait(0.3)
+                    if espEnabled then refreshESP() end
+                end)
+            end
+        end)
+        Fluent:Notify({Title = "ESP", Content = "ESP đã bật! Phát hiện role ngay đầu trận", Duration = 2})
+    else
+        for _, hl in pairs(espHighlights) do pcall(function() hl:Destroy() end) end
+        espHighlights = {}
+        for _, hl in pairs(gunHighlights) do pcall(function() hl:Destroy() end) end
+        gunHighlights = {}
+        Fluent:Notify({Title = "ESP", Content = "ESP đã tắt!", Duration = 1})
+    end
+end)
+
+-- Reset ESP Button
+MainTab:AddButton({
+    Title = "Reset ESP",
+    Description = "Làm mới ESP nếu bị lỗi role",
+    Callback = function()
+        if espEnabled then
+            updateAllRoles()
+            refreshESP()
+            Fluent:Notify({Title = "ESP", Content = "Đã reset!", Duration = 1})
+        else
+            Fluent:Notify({Title = "ESP", Content = "Bật ESP trước!", Duration = 1})
+        end
+    end
+})
+
+-- Aimbot Toggle
+local AimbotToggle = MainTab:AddToggle("AimbotToggle", {
+    Title = "Aimbot (Shift Lock)",
+    Description = "Tự động ghim camera vào Murderer khi bật Shift Lock",
+    Default = false
+})
+AimbotToggle:OnChanged(function()
+    aimbotEnabled = AimbotToggle.Value
+    if aimbotEnabled then
+        startAimbot()
+        Fluent:Notify({Title = "Aimbot", Content = "Aimbot đã bật! Nhấn Shift Lock để kích hoạt", Duration = 2})
+    else
+        if aimbotConn then aimbotConn:Disconnect() end
+        if aimCircle then aimCircle:Destroy() aimCircle = nil end
+        Fluent:Notify({Title = "Aimbot", Content = "Aimbot đã tắt!", Duration = 1})
+    end
+end)
+
+-- Grab Gun Button
+MainTab:AddButton({
+    Title = "Grab Gun",
+    Description = "Teleport đến súng gần nhất và tự động nhặt",
+    Callback = grabGun
+})
+
+-- Đóng Menu Button
+MainTab:AddButton({
+    Title = "Đóng Menu",
+    Description = "Đóng giao diện THAI TU HUB",
+    Callback = function()
+        Window:Destroy()
+    end
+})
+
+-- ========== ADDONS ==========
+SaveManager:SetLibrary(Fluent)
+InterfaceManager:SetLibrary(Fluent)
+SaveManager:IgnoreThemeSettings()
+SaveManager:SetIgnoreIndexes({})
+InterfaceManager:SetFolder("THAI TU HUB")
+SaveManager:SetFolder("THAI TU HUB/MM2")
+InterfaceManager:BuildInterfaceSection(MainTab)
+SaveManager:BuildConfigSection(MainTab)
+
+Window:SelectTab(1)
+SaveManager:LoadAutoloadConfig()
+
+-- ========== THÔNG BÁO ==========
+Fluent:Notify({
+    Title = "THAI TU HUB",
+    Content = "Đã tải thành công! Phát hiện role qua leaderstats + vũ khí ngay đầu trận",
+    Duration = 4
+})
+
+print("THAI TU HUB - ONE TOP đã chạy thành công!")
+print("ESP phát hiện role qua leaderstats (ngay đầu trận) và vũ khí")
