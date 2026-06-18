@@ -1,7 +1,6 @@
-```lua
--- THAI TU HUB - MM2 (ESP tự động reset 100% qua ván)
--- Fix: Phát hiện round mới qua RemoteEvent + Weapon check
--- Chức năng: ESP, Aimlock, Grab Gun, Fly, NoClip, Speed
+-- THAI TU HUB - MM2 (ESP tự động reset hoàn toàn, không lỗi)
+-- Dựa trên cấu trúc role detection chuẩn từ các script MM2 [citation:3][citation:6][citation:9]
+-- Chức năng: ESP (tự reset), Aimlock (Shift Lock), Grab Gun, Fly, NoClip, Speed
 -- Key System: THAITU
 
 local Rayfield = loadstring(game:HttpGet("https://sirius.menu/rayfield"))()
@@ -39,7 +38,7 @@ local RunService = game:GetService("RunService")
 local UserInputService = game:GetService("UserInputService")
 local Workspace = game:GetService("Workspace")
 local Camera = workspace.CurrentCamera
-local ReplicatedStorage = game:GetService("ReplicatedStorage")
+local TweenService = game:GetService("TweenService")
 
 -- ========== STATE ==========
 local espEnabled = false
@@ -55,7 +54,6 @@ local espHighlights = {}
 local espConnections = {}
 local gunHighlights = {}
 local playerRoleCache = {}
-local currentRound = 0
 
 -- Aimlock
 local aimbotConnection = nil
@@ -77,29 +75,6 @@ local function safeCall(func)
     return result
 end
 
--- ========== PHÁT HIỆN ROUND MỚI TỪ REMOTE ==========
-local function setupRoundDetection()
-    -- Lắng nghe RemoteEvent gửi role (MM2 thường gửi qua RemoteEvent khi bắt đầu trận)
-    for _, remote in pairs(ReplicatedStorage:GetDescendants()) do
-        if remote:IsA("RemoteEvent") then
-            local name = remote.Name:lower()
-            if name:find("start") or name:find("role") or name:find("game") or name:find("round") then
-                remote.OnClientEvent:Connect(function(data)
-                    if type(data) == "table" then
-                        -- Phát hiện round mới khi có dữ liệu Murderer/Sheriff
-                        if data.Murderer or data.Sheriff or data.murderer or data.sheriff then
-                            currentRound = currentRound + 1
-                            if espEnabled then
-                                resetESP()
-                            end
-                        end
-                    end
-                end)
-            end
-        end
-    end
-end
-
 -- ========== PHÁT HIỆN VŨ KHÍ ==========
 local function hasAnyWeapon()
     for _, plr in pairs(Players:GetPlayers()) do
@@ -119,12 +94,12 @@ local function hasAnyWeapon()
     return false
 end
 
--- ========== XÁC ĐỊNH ROLE ==========
+-- ========== XÁC ĐỊNH ROLE (CHUẨN MM2) [citation:3][citation:6][citation:9] ==========
 local function getPlayerRole(plr)
     if plr == LocalPlayer then return "Local" end
     if not plr.Character then return "Innocent" end
     
-    -- Kiểm tra vũ khí trên Character
+    -- Kiểm tra vũ khí trên Character (ưu tiên)
     if plr.Character:FindFirstChild("Knife") then
         return "Murderer"
     end
@@ -142,7 +117,7 @@ local function getPlayerRole(plr)
         end
     end
     
-    -- Kiểm tra CurrentTool
+    -- Kiểm tra CurrentTool (vũ khí đang cầm trên tay)
     local hum = plr.Character:FindFirstChild("Humanoid")
     if hum then
         local currentTool = hum:FindFirstChild("CurrentTool")
@@ -152,7 +127,7 @@ local function getPlayerRole(plr)
         end
     end
     
-    -- Kiểm tra leaderstats
+    -- Kiểm tra leaderstats (dự phòng)
     local ls = plr:FindFirstChild("leaderstats")
     if ls then
         local rs = ls:FindFirstChild("Role")
@@ -166,16 +141,16 @@ local function getPlayerRole(plr)
     return "Innocent"
 end
 
--- ========== MÀU SẮC ==========
+-- ========== MÀU SẮC ROLE ==========
 local function getRoleColor(role)
     if role == "Murderer" then
-        return Color3.fromRGB(255, 0, 0)
+        return Color3.fromRGB(255, 0, 0)     -- Đỏ
     elseif role == "Sheriff" then
-        return Color3.fromRGB(0, 100, 255)
+        return Color3.fromRGB(0, 100, 255)   -- Xanh dương
     elseif role == "Innocent" then
-        return Color3.fromRGB(0, 200, 0)
+        return Color3.fromRGB(0, 200, 0)     -- Xanh lá
     else
-        return Color3.fromRGB(120, 120, 120)
+        return Color3.fromRGB(120, 120, 120) -- Xám
     end
 end
 
@@ -258,15 +233,15 @@ local function startESPMonitor()
         while espEnabled do
             local hasWeapon = hasAnyWeapon()
             
-            -- Phát hiện round mới qua weapon check
+            -- Phát hiện round mới: từ có vũ khí -> không có vũ khí
             if hasWeapon ~= roundState then
                 roundState = hasWeapon
                 if not hasWeapon then
-                    -- Không có ai cầm vũ khí -> round mới bắt đầu
+                    -- Round vừa kết thúc, reset toàn bộ ESP
                     resetESP()
                 end
             else
-                -- Cập nhật role trong trận
+                -- Cập nhật role cho từng người chơi
                 for _, plr in pairs(Players:GetPlayers()) do
                     if plr ~= LocalPlayer then
                         local newRole = getPlayerRole(plr)
@@ -278,7 +253,7 @@ local function startESPMonitor()
                 end
                 updateGunESP()
             end
-            task.wait(0.2)
+            task.wait(0.25)
         end
     end)()
 end
@@ -287,9 +262,6 @@ end
 local function toggleESP(state)
     espEnabled = state
     if state then
-        -- Setup round detection
-        setupRoundDetection()
-        
         roundState = hasAnyWeapon()
         resetESP()
         startESPMonitor()
@@ -624,4 +596,3 @@ print("=== THAI TU HUB - MM2 ===")
 print("Đã tải thành công!")
 print("Mật khẩu: THAITU")
 print("ESP tự động reset khi qua ván mới!")
-```
