@@ -1,5 +1,8 @@
--- THAI TU HUB - MM2 🗡️🔫 (Rayfield UI - Key System THAITU)
--- ESP FIX: Xóa cache role mỗi khi vào trận mới, cập nhật màu realtime
+```lua
+-- THAI TU HUB - MM2 (ESP tự động reset 100% qua ván)
+-- Fix: Phát hiện round mới qua RemoteEvent + Weapon check
+-- Chức năng: ESP, Aimlock, Grab Gun, Fly, NoClip, Speed
+-- Key System: THAITU
 
 local Rayfield = loadstring(game:HttpGet("https://sirius.menu/rayfield"))()
 
@@ -19,9 +22,10 @@ local Window = Rayfield:CreateWindow({
     KeySettings = {
         Title = "THAI TU HUB",
         Subtitle = "NHẬP KEY",
-        Note = "Key: THAITU",
+        Note = "",
         FileName = "ThaiTuHub_Key",
         SaveKey = true,
+        GrabKeyFromSite = false,
         Key = {"THAITU"}
     }
 })
@@ -35,115 +39,172 @@ local RunService = game:GetService("RunService")
 local UserInputService = game:GetService("UserInputService")
 local Workspace = game:GetService("Workspace")
 local Camera = workspace.CurrentCamera
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
 
+-- ========== STATE ==========
 local espEnabled = false
 local aimbotEnabled = false
+local grabGunEnabled = false
+local grabGunConnection = nil
+local flyEnabled = false
+local noclipEnabled = false
+local speedEnabled = false
+
+-- ESP
 local espHighlights = {}
+local espConnections = {}
 local gunHighlights = {}
-local aimbotConn = nil
+local playerRoleCache = {}
+local currentRound = 0
+
+-- Aimlock
+local aimbotConnection = nil
 local aimCircle = nil
 
--- ========== PHÁT HIỆN ROLE (CHÍNH XÁC) ==========
+-- Fly
+local flyBV = nil
+
+-- Speed
+local originalSpeed = 16
+
+-- ========== HÀM AN TOÀN ==========
+local function safeCall(func)
+    local success, result = pcall(func)
+    if not success then
+        warn("[THAI TU] Error: " .. tostring(result))
+        return nil
+    end
+    return result
+end
+
+-- ========== PHÁT HIỆN ROUND MỚI TỪ REMOTE ==========
+local function setupRoundDetection()
+    -- Lắng nghe RemoteEvent gửi role (MM2 thường gửi qua RemoteEvent khi bắt đầu trận)
+    for _, remote in pairs(ReplicatedStorage:GetDescendants()) do
+        if remote:IsA("RemoteEvent") then
+            local name = remote.Name:lower()
+            if name:find("start") or name:find("role") or name:find("game") or name:find("round") then
+                remote.OnClientEvent:Connect(function(data)
+                    if type(data) == "table" then
+                        -- Phát hiện round mới khi có dữ liệu Murderer/Sheriff
+                        if data.Murderer or data.Sheriff or data.murderer or data.sheriff then
+                            currentRound = currentRound + 1
+                            if espEnabled then
+                                resetESP()
+                            end
+                        end
+                    end
+                end)
+            end
+        end
+    end
+end
+
+-- ========== PHÁT HIỆN VŨ KHÍ ==========
+local function hasAnyWeapon()
+    for _, plr in pairs(Players:GetPlayers()) do
+        if plr ~= LocalPlayer then
+            if plr.Character then
+                if plr.Character:FindFirstChild("Knife") or plr.Character:FindFirstChild("Gun") then
+                    return true
+                end
+            end
+            if plr.Backpack then
+                if plr.Backpack:FindFirstChild("Knife") or plr.Backpack:FindFirstChild("Gun") then
+                    return true
+                end
+            end
+        end
+    end
+    return false
+end
+
+-- ========== XÁC ĐỊNH ROLE ==========
 local function getPlayerRole(plr)
-    if plr == LocalPlayer then return nil end
+    if plr == LocalPlayer then return "Local" end
+    if not plr.Character then return "Innocent" end
     
-    -- 1. Kiểm tra leaderstats
+    -- Kiểm tra vũ khí trên Character
+    if plr.Character:FindFirstChild("Knife") then
+        return "Murderer"
+    end
+    if plr.Character:FindFirstChild("Gun") then
+        return "Sheriff"
+    end
+    
+    -- Kiểm tra Backpack
+    if plr.Backpack then
+        if plr.Backpack:FindFirstChild("Knife") then
+            return "Murderer"
+        end
+        if plr.Backpack:FindFirstChild("Gun") then
+            return "Sheriff"
+        end
+    end
+    
+    -- Kiểm tra CurrentTool
+    local hum = plr.Character:FindFirstChild("Humanoid")
+    if hum then
+        local currentTool = hum:FindFirstChild("CurrentTool")
+        if currentTool then
+            if currentTool.Name == "Knife" then return "Murderer" end
+            if currentTool.Name == "Gun" then return "Sheriff" end
+        end
+    end
+    
+    -- Kiểm tra leaderstats
     local ls = plr:FindFirstChild("leaderstats")
     if ls then
         local rs = ls:FindFirstChild("Role")
         if rs then
             local val = tostring(rs.Value)
-            if val:find("Murderer") or val:find("Murder") then
-                return "Murderer"
-            elseif val:find("Sheriff") then
-                return "Sheriff"
-            end
-        end
-    end
-    
-    -- 2. Kiểm tra Backpack (kho đồ)
-    if plr.Backpack then
-        for _, tool in pairs(plr.Backpack:GetChildren()) do
-            if tool:IsA("Tool") then
-                if tool.Name == "Knife" then return "Murderer" end
-                if tool.Name == "Gun" then return "Sheriff" end
-            end
-        end
-    end
-    
-    -- 3. Kiểm tra Character (vũ khí đang cầm)
-    if plr.Character then
-        for _, tool in pairs(plr.Character:GetChildren()) do
-            if tool:IsA("Tool") then
-                if tool.Name == "Knife" then return "Murderer" end
-                if tool.Name == "Gun" then return "Sheriff" end
-            end
-        end
-        -- Kiểm tra CurrentTool
-        local hum = plr.Character:FindFirstChild("Humanoid")
-        if hum then
-            local currentTool = hum:FindFirstChild("CurrentTool")
-            if currentTool then
-                if currentTool.Name == "Knife" then return "Murderer" end
-                if currentTool.Name == "Gun" then return "Sheriff" end
-            end
+            if val:find("Murderer") or val:find("Murder") then return "Murderer" end
+            if val:find("Sheriff") then return "Sheriff" end
         end
     end
     
     return "Innocent"
 end
 
--- ========== KIỂM TRA ROUND MỚI ==========
-local function isNewRound()
-    local hasWeapon = false
-    for _, plr in pairs(Players:GetPlayers()) do
-        if plr ~= LocalPlayer then
-            if plr.Character then
-                if plr.Character:FindFirstChild("Knife") or plr.Character:FindFirstChild("Gun") then
-                    hasWeapon = true
-                    break
-                end
-            end
-            if plr.Backpack then
-                if plr.Backpack:FindFirstChild("Knife") or plr.Backpack:FindFirstChild("Gun") then
-                    hasWeapon = true
-                    break
-                end
-            end
-        end
+-- ========== MÀU SẮC ==========
+local function getRoleColor(role)
+    if role == "Murderer" then
+        return Color3.fromRGB(255, 0, 0)
+    elseif role == "Sheriff" then
+        return Color3.fromRGB(0, 100, 255)
+    elseif role == "Innocent" then
+        return Color3.fromRGB(0, 200, 0)
+    else
+        return Color3.fromRGB(120, 120, 120)
     end
-    return not hasWeapon
 end
 
 -- ========== ESP ==========
-local function clearAllESP()
-    for _, hl in pairs(espHighlights) do pcall(function() hl:Destroy() end) end
-    espHighlights = {}
-    for _, hl in pairs(gunHighlights) do pcall(function() hl:Destroy() end) end
-    gunHighlights = {}
-end
-
-local function createPlayerESP(plr)
-    if not espEnabled or not plr.Character then return end
+local function createESP(plr)
+    if not espEnabled or plr == LocalPlayer or not plr.Character then return end
     if espHighlights[plr] then
         pcall(function() espHighlights[plr]:Destroy() end)
+        espHighlights[plr] = nil
     end
     
     local role = getPlayerRole(plr)
+    playerRoleCache[plr.Name] = role
+    
     local hl = Instance.new("Highlight")
     hl.Adornee = plr.Character
     hl.Parent = plr.Character
     hl.FillTransparency = 0.4
     hl.OutlineColor = Color3.fromRGB(255, 255, 255)
-    
-    if role == "Murderer" then
-        hl.FillColor = Color3.fromRGB(255, 0, 0)
-    elseif role == "Sheriff" then
-        hl.FillColor = Color3.fromRGB(0, 100, 255)
-    else
-        hl.FillColor = Color3.fromRGB(120, 120, 120)
-    end
+    hl.FillColor = getRoleColor(role)
     espHighlights[plr] = hl
+end
+
+local function updateESPColor(plr)
+    local hl = espHighlights[plr]
+    if not hl or not hl.Parent then return end
+    local role = getPlayerRole(plr)
+    playerRoleCache[plr.Name] = role
+    hl.FillColor = getRoleColor(role)
 end
 
 local function updateGunESP()
@@ -167,41 +228,51 @@ local function updateGunESP()
     end
 end
 
-local function refreshAllESP()
+-- ========== RESET ESP ==========
+local function resetESP()
     if not espEnabled then return end
+    
+    -- Xóa hết highlight cũ
+    for _, hl in pairs(espHighlights) do pcall(function() hl:Destroy() end) end
+    espHighlights = {}
+    for _, hl in pairs(gunHighlights) do pcall(function() hl:Destroy() end) end
+    gunHighlights = {}
+    playerRoleCache = {}
+    
+    -- Tạo lại ESP cho tất cả người chơi
     for _, plr in pairs(Players:GetPlayers()) do
-        if plr ~= LocalPlayer and plr.Character then
-            createPlayerESP(plr)
+        if plr ~= LocalPlayer then
+            if plr.Character then
+                createESP(plr)
+            end
         end
     end
     updateGunESP()
 end
 
 -- ========== VÒNG LẶP ESP CHÍNH ==========
-local lastRoundState = nil
+local roundState = false
 
-local function startESPLoop()
+local function startESPMonitor()
     coroutine.wrap(function()
         while espEnabled do
-            local roundState = isNewRound()
+            local hasWeapon = hasAnyWeapon()
             
-            -- Phát hiện round mới: reset toàn bộ
-            if roundState ~= lastRoundState and roundState == true then
-                lastRoundState = roundState
-                clearAllESP()
-                refreshAllESP()
+            -- Phát hiện round mới qua weapon check
+            if hasWeapon ~= roundState then
+                roundState = hasWeapon
+                if not hasWeapon then
+                    -- Không có ai cầm vũ khí -> round mới bắt đầu
+                    resetESP()
+                end
             else
-                lastRoundState = roundState
-                -- Cập nhật màu cho từng người chơi
-                for plr, hl in pairs(espHighlights) do
-                    if hl and hl.Parent then
-                        local role = getPlayerRole(plr)
-                        if role == "Murderer" then
-                            hl.FillColor = Color3.fromRGB(255, 0, 0)
-                        elseif role == "Sheriff" then
-                            hl.FillColor = Color3.fromRGB(0, 100, 255)
-                        else
-                            hl.FillColor = Color3.fromRGB(120, 120, 120)
+                -- Cập nhật role trong trận
+                for _, plr in pairs(Players:GetPlayers()) do
+                    if plr ~= LocalPlayer then
+                        local newRole = getPlayerRole(plr)
+                        if playerRoleCache[plr.Name] ~= newRole then
+                            playerRoleCache[plr.Name] = newRole
+                            updateESPColor(plr)
                         end
                     end
                 end
@@ -212,48 +283,67 @@ local function startESPLoop()
     end)()
 end
 
+-- ========== TOGGLE ESP ==========
 local function toggleESP(state)
     espEnabled = state
     if state then
-        lastRoundState = nil
-        refreshAllESP()
-        startESPLoop()
+        -- Setup round detection
+        setupRoundDetection()
+        
+        roundState = hasAnyWeapon()
+        resetESP()
+        startESPMonitor()
         
         -- Lắng nghe người chơi mới
-        Players.PlayerAdded:Connect(function(plr)
-            if espEnabled and plr ~= LocalPlayer then
-                plr.CharacterAdded:Connect(function()
+        local function onPlayerAdded(plr)
+            if espEnabled then
+                local conn = plr.CharacterAdded:Connect(function()
                     task.wait(0.5)
-                    if espEnabled then createPlayerESP(plr) end
+                    if espEnabled then
+                        createESP(plr)
+                    end
                 end)
-            end
-        end)
-        
-        for _, plr in pairs(Players:GetPlayers()) do
-            if plr ~= LocalPlayer then
-                plr.CharacterAdded:Connect(function()
-                    task.wait(0.5)
-                    if espEnabled then createPlayerESP(plr) end
-                end)
+                table.insert(espConnections, conn)
             end
         end
         
+        for _, plr in pairs(Players:GetPlayers()) do
+            if plr ~= LocalPlayer then
+                local conn = plr.CharacterAdded:Connect(function()
+                    task.wait(0.5)
+                    if espEnabled then
+                        createESP(plr)
+                    end
+                end)
+                table.insert(espConnections, conn)
+            end
+        end
+        
+        local playerAddedConn = Players.PlayerAdded:Connect(onPlayerAdded)
+        table.insert(espConnections, playerAddedConn)
+        
         Rayfield:Notify({Title = "ESP", Content = "Đã bật! Tự động reset qua ván", Duration = 2})
     else
-        clearAllESP()
+        for _, conn in pairs(espConnections) do pcall(function() conn:Disconnect() end) end
+        espConnections = {}
+        for _, hl in pairs(espHighlights) do pcall(function() hl:Destroy() end) end
+        espHighlights = {}
+        for _, hl in pairs(gunHighlights) do pcall(function() hl:Destroy() end) end
+        gunHighlights = {}
+        playerRoleCache = {}
         Rayfield:Notify({Title = "ESP", Content = "Đã tắt!", Duration = 2})
     end
 end
 
--- ========== AIMBOT ==========
-local function createAimCircle()
+-- ========== AIMLOCK ==========
+local function createFOVCircle()
     if aimCircle then aimCircle:Destroy() end
     local circle = Instance.new("Frame")
-    circle.Size = UDim2.new(0, 110, 0, 110)
-    circle.Position = UDim2.new(0.5, -55, 0.5, -55)
+    circle.Size = UDim2.new(0, 220, 0, 220)
+    circle.Position = UDim2.new(0.5, -110, 0.5, -110)
     circle.BackgroundTransparency = 1
-    circle.BorderSizePixel = 4
-    circle.BorderColor3 = Color3.fromRGB(255, 0, 0)
+    circle.BorderSizePixel = 2
+    circle.BorderColor3 = Color3.fromRGB(255, 255, 255)
     circle.Visible = false
     circle.Parent = game:GetService("CoreGui")
     local circCorner = Instance.new("UICorner")
@@ -262,99 +352,146 @@ local function createAimCircle()
     return circle
 end
 
-local function startAimbot()
-    if aimbotConn then aimbotConn:Disconnect() end
-    aimbotConn = RunService.RenderStepped:Connect(function()
+local function isPlayerHoldingGun()
+    local char = LocalPlayer.Character
+    if not char then return false end
+    local hum = char:FindFirstChild("Humanoid")
+    if hum then
+        local tool = hum:FindFirstChild("CurrentTool")
+        if tool and (tool.Name == "Gun" or tool.Name:lower():find("gun")) then
+            return true
+        end
+    end
+    for _, child in pairs(char:GetChildren()) do
+        if child:IsA("Tool") and (child.Name == "Gun" or child.Name:lower():find("gun")) then
+            return true
+        end
+    end
+    return false
+end
+
+local function startAimlock()
+    if aimbotConnection then aimbotConnection:Disconnect() end
+    
+    aimCircle = createFOVCircle()
+    local smoothness = 0.3
+    
+    aimbotConnection = RunService.RenderStepped:Connect(function()
         if not aimbotEnabled then
             if aimCircle then aimCircle.Visible = false end
             return
         end
-        if UserInputService.MouseBehavior == Enum.MouseBehavior.LockCenter then
-            if not aimCircle then aimCircle = createAimCircle() end
-            aimCircle.Visible = true
-            local target = nil
-            local center = Vector2.new(Camera.ViewportSize.X / 2, Camera.ViewportSize.Y / 2)
-            local bestDist = 450
-            for _, plr in pairs(Players:GetPlayers()) do
-                if plr ~= LocalPlayer and plr.Character then
-                    local role = getPlayerRole(plr)
-                    if role == "Murderer" then
-                        local hrp = plr.Character:FindFirstChild("HumanoidRootPart")
-                        if hrp then
-                            local pos, on = Camera:WorldToScreenPoint(hrp.Position)
-                            if on then
-                                local d = (Vector2.new(pos.X, pos.Y) - center).Magnitude
-                                if d < bestDist then
-                                    bestDist = d
-                                    target = hrp
-                                end
+        
+        local shiftLock = (UserInputService.MouseBehavior == Enum.MouseBehavior.LockCenter)
+        if not shiftLock then
+            if aimCircle then aimCircle.Visible = false end
+            return
+        end
+        
+        if not isPlayerHoldingGun() then
+            if aimCircle then aimCircle.Visible = false end
+            return
+        end
+        
+        if aimCircle then aimCircle.Visible = true end
+        
+        local target = nil
+        local center = Vector2.new(Camera.ViewportSize.X / 2, Camera.ViewportSize.Y / 2)
+        local bestDist = 220
+        
+        for _, plr in pairs(Players:GetPlayers()) do
+            if plr ~= LocalPlayer and plr.Character then
+                local role = playerRoleCache[plr.Name] or getPlayerRole(plr)
+                if role == "Murderer" then
+                    local hrp = plr.Character:FindFirstChild("HumanoidRootPart")
+                    if hrp then
+                        local pos, onScreen = Camera:WorldToScreenPoint(hrp.Position)
+                        if onScreen then
+                            local d = (Vector2.new(pos.X, pos.Y) - center).Magnitude
+                            if d < bestDist then
+                                bestDist = d
+                                target = hrp
                             end
                         end
                     end
                 end
             end
-            if target then
-                Camera.CFrame = CFrame.new(Camera.CFrame.Position, target.Position)
-            end
-        else
-            if aimCircle then aimCircle.Visible = false end
+        end
+        
+        if target then
+            local currentCF = Camera.CFrame
+            local targetCF = CFrame.new(currentCF.Position, target.Position)
+            local newCF = currentCF:Lerp(targetCF, smoothness)
+            Camera.CFrame = newCF
         end
     end)
 end
 
-local function toggleAimbot(state)
+local function toggleAimlock(state)
     aimbotEnabled = state
-    if aimbotEnabled then
-        startAimbot()
-        Rayfield:Notify({Title = "Aimbot", Content = "Đã bật! Nhấn Shift Lock để kích hoạt", Duration = 2})
+    if state then
+        startAimlock()
+        Rayfield:Notify({Title = "Aimlock", Content = "Đã bật! Nhấn Shift Lock + cầm súng", Duration = 2})
     else
-        if aimbotConn then aimbotConn:Disconnect() end
+        if aimbotConnection then aimbotConnection:Disconnect() end
         if aimCircle then aimCircle:Destroy() aimCircle = nil end
-        Rayfield:Notify({Title = "Aimbot", Content = "Đã tắt!", Duration = 2})
+        Rayfield:Notify({Title = "Aimlock", Content = "Đã tắt!", Duration = 2})
     end
 end
 
 -- ========== GRAB GUN ==========
-local function grabGun()
-    if not LocalPlayer.Character then
-        Rayfield:Notify({Title = "Lỗi", Content = "Không tìm thấy nhân vật!", Duration = 2})
-        return
-    end
+local function teleportToGun(gun)
+    if not LocalPlayer.Character then return end
     local hrp = LocalPlayer.Character:FindFirstChild("HumanoidRootPart")
     if not hrp then return end
-    local closestGun = nil
-    local minDist = math.huge
-    local pos = hrp.Position
-    for _, item in pairs(Workspace:GetDescendants()) do
-        if item:IsA("Tool") and item.Name == "Gun" and item:FindFirstChild("Handle") then
-            local parent = item.Parent
+    
+    local originalPos = hrp.CFrame
+    local gunPos = gun.Handle.CFrame * CFrame.new(0, 2, 0)
+    
+    hrp.CFrame = gunPos
+    task.wait(0.15)
+    
+    local prompt = gun:FindFirstChild("ProximityPrompt")
+    if prompt then
+        prompt:InputHoldBegin()
+        task.wait(0.1)
+        prompt:InputHoldEnd()
+    end
+    
+    hrp.CFrame = originalPos
+end
+
+local function startGrabGun()
+    if grabGunConnection then return end
+    
+    grabGunConnection = Workspace.ChildAdded:Connect(function(child)
+        if grabGunEnabled and child:IsA("Tool") and child.Name == "Gun" and child:FindFirstChild("Handle") then
+            local parent = child.Parent
             if not parent:IsA("Model") or not parent:FindFirstChild("Humanoid") then
-                local d = (item.Handle.Position - pos).Magnitude
-                if d < minDist then
-                    minDist = d
-                    closestGun = item
-                end
+                safeCall(function()
+                    teleportToGun(child)
+                end)
             end
         end
-    end
-    if closestGun then
-        hrp.CFrame = CFrame.new(closestGun.Handle.Position + Vector3.new(0, 2, 0))
-        task.wait(0.15)
-        local prompt = closestGun:FindFirstChild("ProximityPrompt")
-        if prompt then
-            prompt:InputHoldBegin()
-            task.wait(0.1)
-            prompt:InputHoldEnd()
-        end
-        Rayfield:Notify({Title = "Thành công", Content = "Đã nhặt được súng!", Duration = 2})
+    end)
+    
+    Rayfield:Notify({Title = "Grab Gun", Content = "Đã bật! Sẵn sàng nhặt súng", Duration = 2})
+end
+
+local function toggleGrabGun(state)
+    grabGunEnabled = state
+    if state then
+        startGrabGun()
     else
-        Rayfield:Notify({Title = "Lỗi", Content = "Không tìm thấy súng!", Duration = 2})
+        if grabGunConnection then
+            grabGunConnection:Disconnect()
+            grabGunConnection = nil
+        end
+        Rayfield:Notify({Title = "Grab Gun", Content = "Đã tắt!", Duration = 2})
     end
 end
 
 -- ========== FLY ==========
-local flyEnabled = false
-local flyBV = nil
 local function toggleFly(state)
     flyEnabled = state
     if state then
@@ -389,7 +526,7 @@ local function toggleNoclip(state)
                 end
             end
         end)
-        Rayfield:Notify({Title = "NoClip", Content = "Đã bật xuyên tường!", Duration = 2})
+        Rayfield:Notify({Title = "NoClip", Content = "Đã bật!", Duration = 2})
     else
         Rayfield:Notify({Title = "NoClip", Content = "Đã tắt!", Duration = 2})
     end
@@ -397,7 +534,6 @@ end
 
 -- ========== SPEED ==========
 local speedEnabled = false
-local originalSpeed = 16
 local function toggleSpeed(state)
     speedEnabled = state
     if state and LocalPlayer.Character then
@@ -414,8 +550,8 @@ local function toggleSpeed(state)
     end
 end
 
--- ========== MENU ==========
-MainTab:CreateSection("🎯 CHỨC NĂNG")
+-- ========== UI ==========
+MainTab:CreateSection("🎯 CHỨC NĂNG CHÍNH")
 
 MainTab:CreateToggle({
     Name = "ESP",
@@ -428,23 +564,24 @@ MainTab:CreateButton({
     Name = "Reset ESP (Thủ công)",
     Callback = function()
         if espEnabled then
-            clearAllESP()
-            refreshAllESP()
+            resetESP()
             Rayfield:Notify({Title = "ESP", Content = "Đã reset!", Duration = 2})
         end
     end
 })
 
 MainTab:CreateToggle({
-    Name = "Aimbot (Shift Lock)",
+    Name = "Aimlock (Shift Lock)",
     CurrentValue = false,
-    Flag = "Aimbot",
-    Callback = toggleAimbot
+    Flag = "Aimlock",
+    Callback = toggleAimlock
 })
 
-MainTab:CreateButton({
+MainTab:CreateToggle({
     Name = "Grab Gun",
-    Callback = grabGun
+    CurrentValue = false,
+    Flag = "GrabGun",
+    Callback = toggleGrabGun
 })
 
 MainTab:CreateSection("🚀 TIỆN ÍCH")
@@ -474,13 +611,17 @@ MainTab:CreateSection("📌 THÔNG TIN")
 
 MainTab:CreateParagraph({
     Title = "Màu sắc ESP",
-    Content = "🔴 Murderer | 🔵 Sheriff | ⚪ Innocent | 🟡 Súng rớt"
+    Content = "🔴 Murderer | 🔵 Sheriff | 🟢 Innocent | 🟡 Súng rớt"
 })
 
 MainTab:CreateParagraph({
-    Title = "Key",
-    Content = "🔑 THAITU"
+    Title = "Hướng dẫn",
+    Content = "✅ Aimlock: Bật Shift Lock + cầm súng\n✅ ESP tự reset qua ván\n✅ Grab Gun: Tự động nhặt súng rớt\n✅ Mật khẩu: THAITU"
 })
 
-print("=== THAI TU HUB - MM2 🗡️🔫 ===")
-print("ESP: Tự động reset mỗi khi kết thúc ván")
+-- ========== KHỞI TẠO ==========
+print("=== THAI TU HUB - MM2 ===")
+print("Đã tải thành công!")
+print("Mật khẩu: THAITU")
+print("ESP tự động reset khi qua ván mới!")
+```
